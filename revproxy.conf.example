@@ -7,6 +7,16 @@ health_interval 2
 health_timeout 1
 max_fails 3
 rise 2
-upstream 127.0.0.1 9001 weight=1
-upstream 127.0.0.1 9002 weight=2
-upstream 127.0.0.1 9003 weight=1
+
+# named pools. policy= is optional and overrides the global default.
+pool api policy=wrr
+pool web policy=leastconn
+
+upstream api 127.0.0.1 9001 weight=1
+upstream api 127.0.0.1 9002 weight=2
+upstream web 127.0.0.1 9003 weight=1
+
+# L7 routing. longest path_prefix wins. host= is optional.
+route host=api.local path_prefix=/v1 pool=api
+route path_prefix=/api pool=api
+route path_prefix=/ pool=web

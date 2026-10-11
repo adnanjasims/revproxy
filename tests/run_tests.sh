@@ -209,10 +209,11 @@ upstream_health() {
 import json, sys
 want = sys.argv[1]
 doc = json.load(sys.stdin)
-for row in doc["upstreams"]:
-    if row["addr"] == want:
-        print("down" if row["healthy"] is False else "up")
-        raise SystemExit(0)
+for pool in doc.get("pools", []):
+    for row in pool.get("upstreams", []):
+        if row["addr"] == want:
+            print("down" if row["healthy"] is False else "up")
+            raise SystemExit(0)
 print("missing")
 ' "$1"
 }
@@ -265,6 +266,55 @@ while [ "$i" -le 30 ]; do
     i=$((i + 1))
 done
 [ "$seen" = 1 ] || die "recovered backend got no traffic"
+
+say "path and host routing"
+kill "$PROXY_PID"
+wait "$PROXY_PID"
+PROXY_PID=""
+cat >"$CFG" <<EOF
+listen $LISTEN
+status_port $STATUS
+mode http
+policy rr
+health_interval 1
+health_timeout 1
+max_fails 2
+rise 1
+pool api policy=rr
+pool web policy=rr
+upstream api 127.0.0.1 $BASE weight=1
+upstream api 127.0.0.1 $((BASE + 1)) weight=1
+upstream web 127.0.0.1 $((BASE + 2)) weight=1
+route path_prefix=/api pool=api
+route host=api.local path_prefix=/ pool=api
+route path_prefix=/ pool=web
+EOF
+"$BIN" "$CFG" >"$LOG" 2>&1 &
+PROXY_PID=$!
+sleep 0.3
+kill -0 "$PROXY_PID" 2>/dev/null || die "routing proxy exited early"
+
+body=$(hit "http://127.0.0.1:$LISTEN/")
+case "$body" in
+    *"backend 3"*) ;;
+    *) die "default path should hit web pool: $body" ;;
+esac
+
+body=$(hit "http://127.0.0.1:$LISTEN/api/x")
+case "$body" in
+    *"backend 1"*|*"backend 2"*) ;;
+    *) die "/api should hit api pool: $body" ;;
+esac
+
+body=$(curl -sS -m 3 -H 'Host: api.local' "http://127.0.0.1:$LISTEN/") || die "host route curl"
+case "$body" in
+    *"backend 1"*|*"backend 2"*) ;;
+    *) die "Host api.local should hit api pool: $body" ;;
+esac
+
+code=$(curl -sS -m 3 -o "$BODY" -w '%{http_code}' "http://127.0.0.1:$LISTEN/missing-prefix-should-still-match-root") || die "catch-all"
+[ "$code" = "200" ] || die "catch-all code $code"
+grep -q 'backend 3' "$BODY" || die "catch-all body"
 
 say "tcp mode"
 kill "$PROXY_PID"

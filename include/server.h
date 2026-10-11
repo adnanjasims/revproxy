@@ -82,9 +82,14 @@ struct rp_conn {
     int http;          /* parse headers. off for a raw tcp client/upstream */
     int status_only;   /* accepted on the metrics listener */
     int upstream_index;
+    int pool_id; /* which upstream pool this request routes to */
     int holding_upstream;
     int retries;
     int counted;
+    char req_host[RP_HOST_LEN];
+    char req_path[RP_PATH_LEN];
+    size_t req_host_len;
+    size_t req_path_len;
 
     rp_buf_t in;
     rp_buf_t out;

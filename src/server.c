@@ -459,8 +459,9 @@ static int build_status(rp_server_t *s, rp_conn_t *c, int kind)
         return -1;
     }
     if (kind == 1) {
-        int n = snprintf(body, cap, "{\"active_connections\":%d,\"policy\":\"%s\",\"upstreams\":[",
-                         s->active_conns, policy_name(s->lb.policy));
+        int n = snprintf(body, cap,
+                         "{\"active_connections\":%d,\"default_policy\":\"%s\",\"pools\":[",
+                         s->active_conns, policy_name(s->lb.default_policy));
 
         if (n < 0 || (size_t)n >= cap) {
             free(body);
@@ -477,63 +478,128 @@ static int build_status(rp_server_t *s, rp_conn_t *c, int kind)
         used = (size_t)n;
     }
     {
-        int first = 1;
+        int first_pool = 1;
 
-        for (i = 0; i < RP_MAX_UPSTREAMS; i++) {
-            rp_upstream_t *u = &s->lb.ups[i];
-            char addr[80];
-            int an;
-            unsigned long long reqs;
-            unsigned long long bin;
-            unsigned long long bout;
-            int active;
-            int healthy;
+        for (i = 0; i < RP_MAX_UPOOLS; i++) {
+            rp_upool_t *p = &s->lb.pools[i];
+            int first_up;
+            int j;
+            int n;
+            size_t left;
 
-            if (!atomic_load_explicit(&u->in_use, memory_order_acquire)) {
+            if (!p->in_use) {
                 continue;
             }
-            an = snprintf(addr, sizeof(addr), "%.63s:%u", u->host, (unsigned)u->port);
-            if (an < 0 || (size_t)an >= sizeof(addr)) {
-                free(body);
-                return -1;
-            }
-            reqs = (unsigned long long)atomic_load_explicit(&u->requests, memory_order_relaxed);
-            bin = (unsigned long long)atomic_load_explicit(&u->bytes_in, memory_order_relaxed);
-            bout = (unsigned long long)atomic_load_explicit(&u->bytes_out, memory_order_relaxed);
-            active = atomic_load_explicit(&u->active, memory_order_relaxed);
-            healthy = atomic_load_explicit(&u->healthy, memory_order_acquire);
+            left = cap - used;
             if (kind == 1) {
-                int n;
-                size_t left = cap - used;
-
-                n = snprintf(body + used, left,
-                             "%s{\"addr\":\"%s\",\"healthy\":%s,\"active\":%d,\"requests\":%llu,\"bytes_in\":%llu,\"bytes_out\":%llu}",
-                             first ? "" : ",", addr, healthy ? "true" : "false", active, reqs, bin, bout);
+                n = snprintf(body + used, left, "%s{\"name\":\"%s\",\"policy\":\"%s\",\"upstreams\":[",
+                             first_pool ? "" : ",", p->name, policy_name(p->policy));
                 if (n < 0 || (size_t)n >= left) {
                     free(body);
                     return -1;
                 }
                 used += (size_t)n;
-                first = 0;
+                first_pool = 0;
+                first_up = 1;
             } else {
-                int n;
-                size_t left = cap - used;
+                first_up = 1;
+            }
+            for (j = 0; j < RP_MAX_UPSTREAMS; j++) {
+                rp_upstream_t *u = &s->lb.ups[j];
+                char addr[80];
+                int an;
+                unsigned long long reqs;
+                unsigned long long bin;
+                unsigned long long bout;
+                int active;
+                int healthy;
 
-                n = snprintf(body + used, left,
-                             "lb_upstream_up{addr=\"%s\"} %d\n"
-                             "lb_upstream_requests{addr=\"%s\"} %llu\n"
-                             "lb_upstream_bytes_in{addr=\"%s\"} %llu\n"
-                             "lb_upstream_bytes_out{addr=\"%s\"} %llu\n",
-                             addr, healthy ? 1 : 0, addr, reqs, addr, bin, addr, bout);
-                if (n < 0 || (size_t)n >= left) {
+                if (!atomic_load_explicit(&u->in_use, memory_order_acquire) || u->pool_id != i) {
+                    continue;
+                }
+                an = snprintf(addr, sizeof(addr), "%.63s:%u", u->host, (unsigned)u->port);
+                if (an < 0 || (size_t)an >= sizeof(addr)) {
                     free(body);
                     return -1;
                 }
-                used += (size_t)n;
+                reqs = (unsigned long long)atomic_load_explicit(&u->requests, memory_order_relaxed);
+                bin = (unsigned long long)atomic_load_explicit(&u->bytes_in, memory_order_relaxed);
+                bout = (unsigned long long)atomic_load_explicit(&u->bytes_out, memory_order_relaxed);
+                active = atomic_load_explicit(&u->active, memory_order_relaxed);
+                healthy = atomic_load_explicit(&u->healthy, memory_order_acquire);
+                left = cap - used;
+                if (kind == 1) {
+                    n = snprintf(body + used, left,
+                                 "%s{\"addr\":\"%s\",\"healthy\":%s,\"active\":%d,\"requests\":%llu,"
+                                 "\"bytes_in\":%llu,\"bytes_out\":%llu}",
+                                 first_up ? "" : ",", addr, healthy ? "true" : "false", active, reqs,
+                                 bin, bout);
+                    if (n < 0 || (size_t)n >= left) {
+                        free(body);
+                        return -1;
+                    }
+                    used += (size_t)n;
+                    first_up = 0;
+                } else {
+                    n = snprintf(body + used, left,
+                                 "lb_upstream_up{pool=\"%s\",addr=\"%s\"} %d\n"
+                                 "lb_upstream_requests{pool=\"%s\",addr=\"%s\"} %llu\n"
+                                 "lb_upstream_bytes_in{pool=\"%s\",addr=\"%s\"} %llu\n"
+                                 "lb_upstream_bytes_out{pool=\"%s\",addr=\"%s\"} %llu\n",
+                                 p->name, addr, healthy ? 1 : 0, p->name, addr, reqs, p->name, addr,
+                                 bin, p->name, addr, bout);
+                    if (n < 0 || (size_t)n >= left) {
+                        free(body);
+                        return -1;
+                    }
+                    used += (size_t)n;
+                }
+            }
+            if (kind == 1) {
+                if (used + 2 >= cap) {
+                    free(body);
+                    return -1;
+                }
+                body[used++] = ']';
+                body[used++] = '}';
             }
         }
     }
     if (kind == 1) {
+        int first_route = 1;
+        int n;
+        size_t left;
+
+        if (used + 12 >= cap) {
+            free(body);
+            return -1;
+        }
+        body[used++] = ']';
+        n = snprintf(body + used, cap - used, ",\"routes\":[");
+        if (n < 0 || (size_t)n >= cap - used) {
+            free(body);
+            return -1;
+        }
+        used += (size_t)n;
+        for (i = 0; i < RP_MAX_ROUTES; i++) {
+            rp_route_t *r = &s->lb.routes[i];
+            const char *pname;
+
+            if (!r->in_use || r->pool_id < 0 || r->pool_id >= RP_MAX_UPOOLS) {
+                continue;
+            }
+            pname = s->lb.pools[r->pool_id].name;
+            left = cap - used;
+            n = snprintf(body + used, left,
+                         "%s{\"host\":\"%s\",\"path_prefix\":\"%s\",\"pool\":\"%s\"}",
+                         first_route ? "" : ",", r->host, r->path_prefix, pname);
+            if (n < 0 || (size_t)n >= left) {
+                free(body);
+                return -1;
+            }
+            used += (size_t)n;
+            first_route = 0;
+        }
         if (used + 2 >= cap) {
             free(body);
             return -1;
@@ -582,9 +648,16 @@ static int parse_request_headers(rp_conn_t *c)
     }
     is_get = (first >= 4 && memcmp(base, "GET ", 4) == 0);
     c->head_method = (first >= 5 && memcmp(base, "HEAD ", 5) == 0);
+    c->req_host[0] = '\0';
+    c->req_host_len = 0;
+    c->req_path[0] = '\0';
+    c->req_path_len = 0;
+    c->local_kind = 0;
+    c->pool_id = -1;
     {
         size_t ps = 0;
         size_t pe;
+        size_t plen;
 
         while (ps < first && base[ps] != ' ') {
             ps++;
@@ -600,9 +673,16 @@ static int parse_request_headers(rp_conn_t *c)
         if (pe == ps) {
             return -1;
         }
-        if (is_get && path_is(base + ps, pe - ps, "/status")) {
+        plen = pe - ps;
+        if (plen >= sizeof(c->req_path)) {
+            plen = sizeof(c->req_path) - 1;
+        }
+        memcpy(c->req_path, base + ps, plen);
+        c->req_path[plen] = '\0';
+        c->req_path_len = plen;
+        if (is_get && path_is(c->req_path, c->req_path_len, "/status")) {
             c->local_kind = 1;
-        } else if (is_get && path_is(base + ps, pe - ps, "/metrics")) {
+        } else if (is_get && path_is(c->req_path, c->req_path_len, "/metrics")) {
             c->local_kind = 2;
         }
     }
@@ -664,6 +744,15 @@ static int parse_request_headers(rp_conn_t *c)
             if (value_has_token(base + vs, ve - vs, "keep-alive")) {
                 conn_ka = 1;
             }
+        } else if (name_eq(base + ns, ne - ns, "host")) {
+            size_t hlen = ve - vs;
+
+            if (hlen >= sizeof(c->req_host)) {
+                hlen = sizeof(c->req_host) - 1;
+            }
+            memcpy(c->req_host, base + vs, hlen);
+            c->req_host[hlen] = '\0';
+            c->req_host_len = hlen;
         }
     }
 
@@ -1001,6 +1090,7 @@ static rp_conn_t *conn_get(rp_server_t *s)
     c->index = idx;
     c->fd = -1;
     c->upstream_index = -1;
+    c->pool_id = -1;
     c->watch.kind = EV_CONN;
     c->watch.conn = c;
     c->keep_alive = 1;
@@ -1083,6 +1173,7 @@ static void maybe_complete(rp_server_t *s, rp_conn_t *any)
         client->holding_upstream = 0;
     }
     client->upstream_index = -1;
+    client->pool_id = -1;
     if (!client->keep_alive || client->read_closed) {
         conn_retire(s, client, 0);
         return;
@@ -1098,6 +1189,10 @@ static void maybe_complete(rp_server_t *s, rp_conn_t *any)
     client->head_method = 0;
     client->local_kind = 0;
     client->retries = 0;
+    client->req_host[0] = '\0';
+    client->req_host_len = 0;
+    client->req_path[0] = '\0';
+    client->req_path_len = 0;
     client->state = CONN_READING_REQ;
     client->again = 1;
 }
@@ -1216,6 +1311,12 @@ static void progress_http(rp_server_t *s, rp_conn_t *c)
                 send_simple(s, c, 404, "Not Found", "not found");
                 return;
             }
+            c->pool_id = rp_lb_match_route(&s->lb, c->req_host, c->req_host_len, c->req_path,
+                                           c->req_path_len);
+            if (c->pool_id < 0) {
+                send_simple(s, c, 404, "Not Found", "no route");
+                return;
+            }
             c->state = CONN_CONNECTING_UPSTREAM;
             if (open_upstream(s, c, -1, &used) != 0 && c->retries < 1) {
                 c->retries = 1;
@@ -1262,7 +1363,13 @@ static int open_upstream(rp_server_t *s, rp_conn_t *client, int avoid, int *used
     if (!client || client->dead || client->peer) {
         return -1;
     }
-    idx = rp_lb_select(&s->lb, avoid);
+    if (client->pool_id < 0) {
+        client->pool_id = s->lb.default_pool;
+    }
+    if (client->pool_id < 0) {
+        return -1;
+    }
+    idx = rp_lb_select(&s->lb, client->pool_id, avoid);
     if (idx < 0) {
         return -1;
     }
@@ -1503,6 +1610,7 @@ static void accept_on(rp_server_t *s, int listen_fd, int status_only)
             continue;
         }
         if (!c->http) {
+            c->pool_id = s->lb.default_pool;
             c->state = CONN_CONNECTING_UPSTREAM;
             if (open_upstream(s, c, -1, &used) != 0) {
                 c->retries = 1;
