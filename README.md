@@ -1,6 +1,6 @@
 # revproxy
 
-Linux reverse proxy / load balancer. HTTP/1.1 or plain TCP. libc and pthreads only. No TLS.
+Linux reverse proxy / load balancer. HTTP/1.1 or plain TCP. libc and pthreads only.
 
 One thread runs the epoll loop. Another health-checks backends. HTTP mode can split traffic by `Host` and path prefix into named upstream pools.
 
@@ -76,3 +76,4 @@ make debug
 - unmatched Host/path returns 404
 - client keep-alive works; upstream connections are one-shot
 - `wrk -t4 -c128 -d30s http://127.0.0.1:8080/` is fine for a local check
+
