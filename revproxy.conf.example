@@ -1,0 +1,12 @@
+# plain text. blank lines and # comments are skipped.
+listen 8080
+status_port 8081
+mode http
+policy wrr
+health_interval 2
+health_timeout 1
+max_fails 3
+rise 2
+upstream 127.0.0.1 9001 weight=1
+upstream 127.0.0.1 9002 weight=2
+upstream 127.0.0.1 9003 weight=1
